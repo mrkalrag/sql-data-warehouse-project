@@ -1,0 +1,131 @@
+/*
+====================================================================================
+Bronze Layer Data Quality Checks – Product & Sales Data
+====================================================================================
+
+Purpose:
+Validate the integrity and consistency of Bronze layer data 
+before transformation and loading into the Silver layer.
+
+Key focus areas:
+1. Primary key uniqueness
+2. Whitespace or formatting issues in text fields
+3. Numeric and domain value validity
+4. Date consistency and sequencing
+5. Sales calculation consistency (Sales = Quantity × Price)
+====================================================================================
+*/
+
+/* ============================================================================
+Check 1: Primary Key Integrity
+Ensure product IDs are unique and not null.
+Any result indicates duplicates or missing identifiers.
+============================================================================ */
+SELECT 
+    prd_id,
+    COUNT(*) AS record_count
+FROM bronze.crm_prd_info
+GROUP BY prd_id
+HAVING COUNT(*) > 1 
+    OR prd_id IS NULL;
+
+/* ============================================================================
+Check 2: Unwanted Whitespace in Product Names
+Identify leading or trailing spaces that can affect joins, grouping, or reporting.
+============================================================================ */
+SELECT 
+    prd_nm
+FROM bronze.crm_prd_info
+WHERE prd_nm != TRIM(prd_nm);
+
+/* ============================================================================
+Check 3: Product Cost Validity
+Detect negative or missing product cost values.
+These should be handled during Silver transformation.
+============================================================================ */
+SELECT 
+    prd_cost
+FROM silver.crm_prd_info
+WHERE prd_cost < 0 
+   OR prd_cost IS NULL;
+
+/* ============================================================================
+Check 4: Product Line Domain Values
+Review distinct product line codes to ensure they match known values:
+M = Mountain, R = Road, T = Touring, S = Other Sales
+Any unexpected values may require standardization.
+============================================================================ */
+SELECT DISTINCT 
+    prd_line
+FROM silver.crm_prd_info;
+
+/* ============================================================================
+Check 5: Date Consistency
+Ensure historical records follow logical sequencing:
+- prd_end_dt >= prd_start_dt
+- Order, ship, and due dates are valid
+============================================================================ */
+-- Sales order dates vs. ship/due dates
+SELECT *
+FROM bronze.crm_sales_details
+WHERE sls_order_dt > sls_ship_dt 
+   OR sls_order_dt > sls_due_dt;
+
+-- Validate sales order dates (placeholder values, invalid ranges)
+SELECT
+    NULLIF(sls_order_dt, 0) AS sls_order_date
+FROM bronze.crm_sales_details
+WHERE sls_order_dt <= 0 
+   OR LEN(sls_order_dt) != 8
+   OR sls_order_dt > 20500101
+   OR sls_order_dt < 19000101;
+
+/* ============================================================================
+Check 6: Sales Calculation & Numeric Integrity
+Identify records with missing, negative, or inconsistent values:
+- Sales should equal Quantity × Price
+- Price or sales missing/invalid
+- Quantity missing or <= 0
+============================================================================ */
+WITH sales_dates AS (
+    SELECT
+        sls_ord_num,
+        TRY_CAST(CAST(sls_order_dt AS CHAR(8)) AS DATE) AS order_dt,
+        TRY_CAST(CAST(sls_ship_dt AS CHAR(8)) AS DATE) AS ship_dt,
+        TRY_CAST(CAST(sls_due_dt AS CHAR(8)) AS DATE) AS due_dt,
+        sls_sales,
+        sls_quantity,
+        sls_price
+    FROM bronze.crm_sales_details
+)
+SELECT 
+    sls_sales AS old_sls_sales,
+    sls_quantity,
+    sls_price AS old_sls_price,
+
+    -- Correct sales if missing, negative, or inconsistent
+    CASE 
+        WHEN sls_sales IS NULL 
+             OR sls_sales <= 0
+             OR sls_sales != sls_quantity * ABS(sls_price)
+        THEN sls_quantity * ABS(sls_price)
+        ELSE sls_sales
+    END AS sls_sales,
+
+    -- Correct price if missing or invalid
+    CASE 
+        WHEN sls_price IS NULL 
+             OR sls_price <= 0
+        THEN (sls_quantity * ABS(sls_price)) / NULLIF(sls_quantity,0)
+        ELSE sls_price
+    END AS sls_price
+
+FROM bronze.crm_sales_details
+WHERE sls_sales != sls_quantity * sls_price
+   OR sls_sales IS NULL 
+   OR sls_quantity IS NULL
+   OR sls_price IS NULL 
+   OR sls_sales <= 0
+   OR sls_quantity <= 0 
+   OR sls_price <= 0
+ORDER BY sls_sales, sls_quantity, sls_price;
