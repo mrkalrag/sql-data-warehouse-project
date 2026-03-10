@@ -1,131 +1,149 @@
-/*
-====================================================================================
-Bronze Layer Data Quality Checks – Product & Sales Data
-====================================================================================
+/* ===========================================================
+DATA QUALITY CHECKS – BRONZE & SILVER LAYER
+Purpose: Identify bad data in raw Bronze tables and validate
+transformed Silver tables for consistency and correctness.
+=========================================================== */
 
-Purpose:
-Validate the integrity and consistency of Bronze layer data 
-before transformation and loading into the Silver layer.
+/* ========================== BRONZE LAYER CHECKS ========================== */
+PRINT '================== BRONZE: CUSTOMER TABLE ==================';
 
-Key focus areas:
-1. Primary key uniqueness
-2. Whitespace or formatting issues in text fields
-3. Numeric and domain value validity
-4. Date consistency and sequencing
-5. Sales calculation consistency (Sales = Quantity × Price)
-====================================================================================
-*/
+/* 1. Check NULL customer IDs */
+SELECT cst_id
+FROM bronze.crm_cust_info
+WHERE cst_id IS NULL;
 
-/* ============================================================================
-Check 1: Primary Key Integrity
-Ensure product IDs are unique and not null.
-Any result indicates duplicates or missing identifiers.
-============================================================================ */
-SELECT 
-    prd_id,
-    COUNT(*) AS record_count
-FROM bronze.crm_prd_info
-GROUP BY prd_id
-HAVING COUNT(*) > 1 
-    OR prd_id IS NULL;
+/* 2. Check duplicate customer IDs */
+SELECT cst_id, COUNT(*) AS cnt
+FROM bronze.crm_cust_info
+GROUP BY cst_id
+HAVING COUNT(*) > 1;
 
-/* ============================================================================
-Check 2: Unwanted Whitespace in Product Names
-Identify leading or trailing spaces that can affect joins, grouping, or reporting.
-============================================================================ */
-SELECT 
-    prd_nm
-FROM bronze.crm_prd_info
-WHERE prd_nm != TRIM(prd_nm);
+/* 3. Detect unwanted spaces in names */
+SELECT cst_firstname, cst_lastname
+FROM bronze.crm_cust_info
+WHERE cst_firstname != TRIM(cst_firstname)
+   OR cst_lastname != TRIM(cst_lastname);
 
-/* ============================================================================
-Check 3: Product Cost Validity
-Detect negative or missing product cost values.
-These should be handled during Silver transformation.
-============================================================================ */
-SELECT 
-    prd_cost
-FROM silver.crm_prd_info
-WHERE prd_cost < 0 
-   OR prd_cost IS NULL;
+PRINT '================== BRONZE: SALES TABLE ==================';
 
-/* ============================================================================
-Check 4: Product Line Domain Values
-Review distinct product line codes to ensure they match known values:
-M = Mountain, R = Road, T = Touring, S = Other Sales
-Any unexpected values may require standardization.
-============================================================================ */
-SELECT DISTINCT 
-    prd_line
-FROM silver.crm_prd_info;
-
-/* ============================================================================
-Check 5: Date Consistency
-Ensure historical records follow logical sequencing:
-- prd_end_dt >= prd_start_dt
-- Order, ship, and due dates are valid
-============================================================================ */
--- Sales order dates vs. ship/due dates
+/* 4. Check invalid order/ship/due dates */
 SELECT *
 FROM bronze.crm_sales_details
-WHERE sls_order_dt > sls_ship_dt 
-   OR sls_order_dt > sls_due_dt;
+WHERE LEN(sls_order_dt) != 8
+   OR LEN(sls_ship_dt) != 8
+   OR LEN(sls_due_dt) != 8;
 
--- Validate sales order dates (placeholder values, invalid ranges)
-SELECT
-    NULLIF(sls_order_dt, 0) AS sls_order_date
+/* 5. Check negative or NULL quantity, price, sales */
+SELECT *
 FROM bronze.crm_sales_details
-WHERE sls_order_dt <= 0 
-   OR LEN(sls_order_dt) != 8
-   OR sls_order_dt > 20500101
-   OR sls_order_dt < 19000101;
+WHERE sls_quantity <= 0
+   OR sls_price <= 0
+   OR sls_sales < 0;
 
-/* ============================================================================
-Check 6: Sales Calculation & Numeric Integrity
-Identify records with missing, negative, or inconsistent values:
-- Sales should equal Quantity × Price
-- Price or sales missing/invalid
-- Quantity missing or <= 0
-============================================================================ */
-WITH sales_dates AS (
-    SELECT
-        sls_ord_num,
-        TRY_CAST(CAST(sls_order_dt AS CHAR(8)) AS DATE) AS order_dt,
-        TRY_CAST(CAST(sls_ship_dt AS CHAR(8)) AS DATE) AS ship_dt,
-        TRY_CAST(CAST(sls_due_dt AS CHAR(8)) AS DATE) AS due_dt,
-        sls_sales,
-        sls_quantity,
-        sls_price
-    FROM bronze.crm_sales_details
-)
-SELECT 
-    sls_sales AS old_sls_sales,
-    sls_quantity,
-    sls_price AS old_sls_price,
-
-    -- Correct sales if missing, negative, or inconsistent
-    CASE 
-        WHEN sls_sales IS NULL 
-             OR sls_sales <= 0
-             OR sls_sales != sls_quantity * ABS(sls_price)
-        THEN sls_quantity * ABS(sls_price)
-        ELSE sls_sales
-    END AS sls_sales,
-
-    -- Correct price if missing or invalid
-    CASE 
-        WHEN sls_price IS NULL 
-             OR sls_price <= 0
-        THEN (sls_quantity * ABS(sls_price)) / NULLIF(sls_quantity,0)
-        ELSE sls_price
-    END AS sls_price
-
+/* 6. Check sales consistency (Sales = Quantity × Price) */
+SELECT *
 FROM bronze.crm_sales_details
 WHERE sls_sales != sls_quantity * sls_price
-   OR sls_sales IS NULL 
+   OR sls_sales IS NULL
    OR sls_quantity IS NULL
-   OR sls_price IS NULL 
-   OR sls_sales <= 0
-   OR sls_quantity <= 0 
-   OR sls_price <= 0
-ORDER BY sls_sales, sls_quantity, sls_price;
+   OR sls_price IS NULL;
+
+PRINT '================== BRONZE: ERP CUSTOMER TABLE ==================';
+
+/* 7. Invalid or future/ancient birthdates */
+SELECT bdate
+FROM bronze.erp_cust_az12
+WHERE bdate < '1900-01-01'
+   OR bdate > GETDATE();
+
+/* 8. Invalid gender values */
+SELECT DISTINCT gen
+FROM bronze.erp_cust_az12
+WHERE UPPER(TRIM(gen)) NOT IN ('M','F','MALE','FEMALE');
+
+PRINT '================== BRONZE: PRODUCT CATEGORY TABLE ==================';
+
+/* 9. Unwanted spaces in category/subcategory/maintenance */
+SELECT *
+FROM bronze.erp_px_cat_g1v2
+WHERE cat != TRIM(cat) 
+   OR subcat != TRIM(subcat)
+   OR maintenance != TRIM(maintenance);
+
+/* 10. Review distinct maintenance values */
+SELECT DISTINCT maintenance
+FROM bronze.erp_px_cat_g1v2;
+
+/* ========================== SILVER LAYER CHECKS ========================== */
+PRINT '================== SILVER: CUSTOMER TABLE ==================';
+
+/* 1. NULL or duplicate customer IDs */
+SELECT cst_id
+FROM silver.crm_cust_info
+WHERE cst_id IS NULL;
+
+SELECT cst_id, COUNT(*) AS cnt
+FROM silver.crm_cust_info
+GROUP BY cst_id
+HAVING COUNT(*) > 1;
+
+/* 2. Standardized gender values check */
+SELECT DISTINCT cst_gndr
+FROM silver.crm_cust_info
+WHERE cst_gndr NOT IN ('Male','Female','n/a');
+
+/* 3. Standardized marital status check */
+SELECT DISTINCT cst_marital_status
+FROM silver.crm_cust_info
+WHERE cst_marital_status NOT IN ('Single','Married','n/a');
+
+PRINT '================== SILVER: PRODUCT TABLE ==================';
+
+/* 4. Check product cost validity */
+SELECT prd_cost
+FROM silver.crm_prd_info
+WHERE prd_cost < 0 OR prd_cost IS NULL;
+
+/* 5. Check product line domain values */
+SELECT DISTINCT prd_line
+FROM silver.crm_prd_info
+WHERE prd_line NOT IN ('Mountain','Road','Touring','Other Sales','n/a');
+
+PRINT '================== SILVER: SALES TABLE ==================';
+
+/* 6. Sales consistency: Sales = Quantity × Price */
+SELECT *
+FROM silver.crm_sales_details
+WHERE sls_sales != sls_quantity * sls_price
+   OR sls_sales IS NULL
+   OR sls_quantity IS NULL
+   OR sls_price IS NULL;
+
+/* 7. Date consistency: order <= ship <= due */
+SELECT *
+FROM silver.crm_sales_details
+WHERE sls_order_dt > sls_ship_dt
+   OR sls_ship_dt > sls_due_dt;
+
+/* 8. Foreign key validation: sales keys must exist in products/customers */
+SELECT *
+FROM silver.crm_sales_details
+WHERE sls_prd_key NOT IN (SELECT prd_key FROM silver.crm_prd_info)
+   OR sls_cust_id NOT IN (SELECT cst_id FROM silver.crm_cust_info);
+
+PRINT '================== SILVER: ERP CUSTOMER TABLE ==================';
+
+/* 9. ERP gender standardization */
+SELECT *
+FROM silver.erp_cust_az12
+WHERE gen NOT IN ('Male','Female','n/a');
+
+PRINT '================== SILVER: ERP CATEGORY TABLE ==================';
+
+/* 10. Review distinct maintenance values */
+SELECT DISTINCT maintenance
+FROM silver.erp_px_cat_g1v2;
+
+/* 11. Full ERP category table check for any issues */
+SELECT *
+FROM silver.erp_px_cat_g1v2;
