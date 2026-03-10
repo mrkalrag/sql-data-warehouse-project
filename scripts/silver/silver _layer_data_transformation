@@ -1,4 +1,4 @@
-EXEC silver.load_silver
+
 /*
 WARNING:
 This procedure truncates multiple Silver layer tables before loading data.
